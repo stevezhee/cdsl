@@ -1,0 +1,3 @@
+Right now you can just do runghc Main.hs
+
+I had a problem with a transformers conflict so I ran ghc-pkg hide transformers-compat
