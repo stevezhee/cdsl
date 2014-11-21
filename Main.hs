@@ -1,25 +1,26 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DeriveFunctor     #-}
+{-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TemplateHaskell   #-}
 {-# OPTIONS -Wall -fno-warn-missing-signatures #-}
 
 module Main where
 
-import           Control.Monad.Trans.Except
-import           LLVM.General.AST.Global
-import LLVM.General
-import LLVM.General.Context
-import           Control.Monad hiding (void)
+import           Control.Monad                     hiding (void, when)
+import           Control.Monad.Free
 import           Control.Monad.Free.TH
-import           Control.Monad.State hiding (void)
+import           Control.Monad.State               hiding (void, when)
+import           Control.Monad.Trans.Except
 import           Data.Word
-import           LLVM.General.AST hiding (type')
+import           LLVM.General
+import           LLVM.General.AST                  hiding (type')
+import qualified LLVM.General.AST.Constant         as Const
+import           LLVM.General.AST.Global
 import           LLVM.General.AST.IntegerPredicate
 import           LLVM.General.AST.Type
-import           Prelude hiding (EQ, fst, snd)
-import Control.Monad.Free
-import qualified LLVM.General.AST.Constant as Const
+import           LLVM.General.Context
+import           Prelude                           hiding (EQ, fst, snd, map, sum)
+import qualified Prelude as P
 -- import Debug.Trace
 
 data St = St{ unique :: Word, label :: Name, instrs :: [Named Instruction], blocks :: [BasicBlock] }
@@ -33,7 +34,7 @@ data Expr
   | VName Type Name
   | Op Op [Expr]
   deriving (Show, Eq)
-           
+
 data Op
   = ADD
   | SUB
@@ -51,22 +52,24 @@ data Op
   | UGe
   | ULt
   | ULe
+  | Load_
   | Idx
   | Fst
   | Snd
+  | Zext Type
   deriving (Show, Eq)
 
 data Func a
   = Ret_ (Maybe Expr)
   | Alloca_ Type (Name -> a)
-  | Load_ Expr (Name -> a)
   | Store_ Expr Expr a
   | Switch_ Expr [Name] a
   | Br_ Name a
   | Label_ Name a
   | GenLabel_ (Name -> a)
+  | Nop a
   deriving (Functor)
-  
+
 type M a = Free Func a
 
 makeFree ''Func
@@ -75,7 +78,9 @@ main = tt
 tt = do
   bb <- runM foo
 --  print bb
-  runJit defaultModule{ moduleDefinitions = [ GlobalDefinition functionDefaults{ name = Name "main", returnType = void, parameters = ([], False), basicBlocks = bb } ] }
+  s <- runJit defaultModule{ moduleDefinitions = [ GlobalDefinition functionDefaults{ name = Name "main", returnType = void, parameters = ([], False), basicBlocks = bb } ] }
+  writeFile "t.ll" s
+  putStrLn s
 
 {-
 tt = runJit defaultModule{ moduleDefinitions = map GlobalDefinition [globalVariableDefaults{ name = UnName 55, type' = i32 }, f, g ] }
@@ -86,7 +91,7 @@ tt = runJit defaultModule{ moduleDefinitions = map GlobalDefinition [globalVaria
       , returnType = i32
       , parameters = ([], False)
       , basicBlocks = [BasicBlock (UnName 5) []                                                                                        (Do $ Ret (Just $ cint32 42) []) ] }
-      
+
 newtype Addr = Addr{ unAddr :: Word } deriving (Show, Eq)
 
 -}
@@ -94,10 +99,7 @@ newtype Addr = Addr{ unAddr :: Word } deriving (Show, Eq)
 liftExcept :: ExceptT String IO a -> IO a
 liftExcept = runExceptT >=> either fail return
 
-runJit x = do
-  withContext $ \cxt -> liftExcept $ withModuleFromAST cxt x $ \m -> do
-    s <- moduleLLVMAssembly m
-    putStrLn s
+runJit x = withContext $ \cxt -> liftExcept $ withModuleFromAST cxt x $ \m -> moduleLLVMAssembly m
 
 terminate :: (InstructionMetadata -> Terminator) -> O ()
 terminate f = do
@@ -119,10 +121,6 @@ runFunc x = case x of
   Alloca_ t f -> do
     v <- instr $ Alloca t Nothing 0
     f v
-  Load_ a f -> do
-    oa <- genOperand a
-    v <- instr $ Load False oa Nothing 0
-    f v
   Store_ a b c -> do
     oa <- genOperand a
     ob <- genOperand b
@@ -133,56 +131,57 @@ runFunc x = case x of
     b
   Switch_ a bs c -> do
     oa <- genOperand a
-    terminate $ Switch oa (last bs) $ zip (map (Const.Int 32) [0 ..]) $ init bs
+    terminate $ Switch oa (last bs) $ zip (P.map (Const.Int 32) [0 ..]) $ init bs
     c
   GenLabel_ a -> genName >>= a
   Label_ a b -> do
     modify $ \st -> st{ label = a }
     b
-    
+  Nop a -> a
+  
 data Ptr a
 
-dowhile :: M () -> E Word -> M ()
+dowhile :: E Bool -> M () -> M ()
 dowhile x y = do
-  nb <- genLabel_
-  ne <- genLabel_
+  strt <- genLabel_
+  done <- genLabel_
 
-  br_ nb
-  
-  label_ nb
+  br_ strt
 
-  x
-
-  switch_ (unE y) [ne, nb]
-
-  label_ ne
-
-while :: E Word -> M () -> M ()
-while x y = do
-  np <- genLabel_
-  nb <- genLabel_
-  ne <- genLabel_
-
-  br_ np
-
-  label_ np
-  
-  switch_ (unE x) [ne, nb]
-
-  label_ nb
+  label_ strt
 
   y
 
-  br_ np
-  
-  label_ ne
+  switch_ (unE x) [done, strt]
+
+  label_ done
+
+while :: E Bool -> M () -> M ()
+while x y = do
+  strt <- genLabel_
+  cont <- genLabel_
+  done <- genLabel_
+
+  br_ strt
+
+  label_ strt
+
+  switch_ (unE x) [done, cont]
+
+  label_ cont
+
+  y
+
+  br_ strt
+
+  label_ done
 
 
 switch :: E Word -> [M ()] -> M ()
 switch x ys = do
   ns <- mapM (const genLabel_) ys
   ne <- genLabel_
-  
+
   switch_ (unE x) ns
 
   let
@@ -196,8 +195,6 @@ switch x ys = do
 
   label_ ne
 
-new_ x = new x >>= load
-
 new :: E a -> M (E (Ptr a))
 new x = do
   n <- alloca_ t
@@ -209,6 +206,9 @@ new x = do
 
 data Array a
 data Tuple a b
+
+load :: E (Ptr a) -> E a
+load = unop Load_
 
 fst :: E (Ptr (Tuple a b)) -> E (Ptr a)
 fst = unop Fst
@@ -228,56 +228,63 @@ tuple x y = do
   return v
   where
     t = StructureType False [typeofE x, typeofE y]
+
+count :: E (Ptr (Array a)) -> E Word
+count x = case typeofE x of
+  PointerType (ArrayType n _) _ -> w32 $ fromIntegral n
+  _ -> error "count"
+
+foldr :: (E a -> E b -> E b) -> E (Ptr b) -> E (Ptr (Array a)) -> M ()
+foldr f p arr = do
+  i <- new $ count arr
+  while (load i .!= 0) $ do
+    dec i
+    store p $ f (load $ idx arr $ load i) $ load p
+                 
+map :: (E a -> E b) -> E (Ptr (Array a)) -> E (Ptr (Array b)) -> M ()
+map f xs ys = do
+  i <- new $ count xs
+  while (load i .!= 0) $ do
+    dec i
+    store (idx ys $ load i) $ f $ load $ idx xs $ load i
   
 array :: [E a] -> M (E (Ptr (Array a)))
 array [] = error "empty array"
 array xs = do
   n <- alloca_ t
   let v = E $ VName (ptr t) n
--- BAL:  mapM_ (\(i,x) -> store (idx v i) x) $ zip [0 .. ] xs
+  mapM_ (\(i,x) -> store (idx v i) x) $ zip [0 .. ] xs
   return v
   where
     t = ArrayType (fromIntegral $ length xs) $ typeofE $ head xs
-  
-load :: E (Ptr a) -> M (E a)
-load x = liftM (E . VName t) $ load_ (unE x)
-  where
-    t = case typeofE x of
-      PointerType a _ -> a
-      asdf -> error $ "load" ++ show asdf
 
 bar = do
   i <- new 12
-  j <- load i
-  switch j [ store i 33, store i 11 ]
+  switch (load i) [ store i 33, store i 11 ]
 
-inc x = do
-  a <- load x
-  store x (a .+ 1)
+inc x = store x (load x .+ 1)
+dec x = store x (load x .- 1)
 
+foo :: M ()
 foo = do
   i <- new $ w32 7
   switch 7 [ store i 42 >> store i 44, store i 22, store i 55, bar ]
---   j <- load i
---   store i (j .+ 7)
---   t <- tuple (w32 6) (w32 7)
---   j <- load $ fst t
---   switch j [ store i 13, store i 55 ]
---   j <- load $ snd t
---   switch j [ store i 55, store i 13 ]
---   arr <- array [ w32 3, 4, 5]
---   store (idx arr 4) 12
---   a1 <- load $ idx arr 1
---   store (idx arr 1) 2
---   j <- load $ idx arr 1
---   switch j
---     [ store (idx arr 0) 99
---     , store (fst t) 12
---     , store (snd t) 45
---     ]
---   store i 10
---   dowhile (dec i) (load i)
-  
+  store i (load i .+ 7)
+  t <- tuple (w32 6) (w32 7)
+  switch (load $ fst t) [ store i 13, store i 55 ]
+  switch (load $ snd t) [ store i 55, store i 13 ]
+  arr <- array [ w32 3, 4, 5]
+  store (idx arr 4) 12
+  store (idx arr 1) 2
+  switch (load $ idx arr 1)
+    [ store (idx arr 0) 99
+    , store (fst t) 12
+    , store (snd t) 45
+    ]
+  store i 10
+  dowhile (load i .!= 0) $ dec i
+  return ()
+
 store :: E (Ptr a) -> E a -> M ()
 store x y = store_ (unE x) (unE y)
 
@@ -293,7 +300,7 @@ instr f = do
   v <- genName
   instr_ $ v := f []
   return v
-  
+
 genOperand :: Expr -> O Operand
 genOperand e = case e of
   VWord a -> return $ cint32 $ fromIntegral a
@@ -325,9 +332,11 @@ mkInstr o args = case o of
   UGe -> k UGE
   ULt -> k ULT
   ULe -> k ULE
+  Load_ -> Load False x Nothing 0
   Idx -> m y
   Fst -> m $ cint32 0
   Snd -> m $ cint32 1
+  Zext t -> ZExt x t
   where
     g op = op True True x y
     h op = op False x y
@@ -337,7 +346,7 @@ mkInstr o args = case o of
     m op = GetElementPtr True x [cint32 0, op]
     x = args !! 0
     y = args !! 1
-    
+
 typeofE :: E a -> Type
 typeofE = typeofExpr . unE
 
@@ -362,6 +371,9 @@ typeofExpr e = case e of
     UGe -> i1
     ULt -> i1
     ULe -> i1
+    Load_ -> case typeofExpr x of
+      PointerType t _ -> t
+      _ -> error "Load"
     Fst -> case typeofExpr x of
       PointerType (StructureType _ [t,_]) _ -> ptr t
       _ -> error "Fst"
@@ -373,7 +385,7 @@ typeofExpr e = case e of
       _ -> error "Idx"
     where
       x = bs !! 0
-      
+
 unnop :: Op -> E a -> E b
 unnop o x = E $ Op o [unE x]
 
@@ -417,8 +429,12 @@ infix 4 .<=
 (.>>) = binop LSHR
 (.&) :: E Word -> E Word -> E Word
 (.&) = binop AND
+(.&&) :: E Bool -> E Bool -> E Bool
+(.&&) = binop AND
 (.|) :: E Word -> E Word -> E Word
 (.|) = binop OR
+(.||) :: E Bool -> E Bool -> E Bool
+(.||) = binop OR
 (.^) :: E Word -> E Word -> E Word
 (.^) = binop XOR
 (.==) :: E Word -> E Word -> E Bool
@@ -450,5 +466,47 @@ instance Num (E Word) where
 
 instance Enum (E Word) where
   toEnum = w32 . fromIntegral
-  fromEnum (E (VWord x)) = fromIntegral x
+  fromEnum x = case x of
+    E (VWord a) -> fromIntegral a
+    _ -> error "fromEnum"
+
+(.+=) x y = store x $ load x .+ y
+
+putw :: E Word -> M ()
+putw = undefined
+
+zext :: E Bool -> E Word
+zext = unop (Zext i32)
+
+if_ :: E Bool -> M () -> M () -> M ()
+if_ x y z = switch (zext x) [z,y]
   
+when :: E Bool -> M () -> M ()
+when x y = if_ x y nop
+
+prob1 = do
+  i <- new 999
+  sum <- new 0
+  dowhile (load i .!= 0) $ do
+    when (((load i .% 3) .== 0) .&& ((load i .% 3) .== 0)) $
+      sum .+= load i
+  putw $ load sum
+
+isEven :: E Word -> E Bool
+isEven x = x .% 2 .== 0
+
+swap :: E (Ptr Word) -> E (Ptr Word) -> M ()
+swap x y = do
+  tmp <- new $ load x
+  store x $ load y
+  store y $ load tmp
+
+prob2 = do
+  i <- new 1
+  j <- new 2
+  sum <- new 0
+  dowhile (load j .<= 4000000) $ do
+    when (isEven $ load j) $ sum .+= load j
+    swap i j
+    j .+= load i
+    
