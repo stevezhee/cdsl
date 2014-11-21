@@ -9,3 +9,9 @@ cabal-dev
 .cabal-sandbox/
 cabal.sandbox.config
 cabal.config
+Main_flymake.hs
+*.out
+*.exe
+*.bc
+*.s
+*.ll

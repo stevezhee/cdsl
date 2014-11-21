@@ -71,13 +71,13 @@ type M a = Free Func a
 
 makeFree ''Func
 
+main = tt
 tt = do
   bb <- runM foo
 --  print bb
   runJit defaultModule{ moduleDefinitions = [ GlobalDefinition functionDefaults{ name = Name "main", returnType = void, parameters = ([], False), basicBlocks = bb } ] }
 
 {-
-main = tt
 tt = runJit defaultModule{ moduleDefinitions = map GlobalDefinition [globalVariableDefaults{ name = UnName 55, type' = i32 }, f, g ] }
   where
     f = functionDefaults{ name = UnName 0, returnType = void, parameters = ([], False), basicBlocks = [] }
@@ -141,6 +141,42 @@ runFunc x = case x of
     b
     
 data Ptr a
+
+dowhile :: M () -> E Word -> M ()
+dowhile x y = do
+  nb <- genLabel_
+  ne <- genLabel_
+
+  br_ nb
+  
+  label_ nb
+
+  x
+
+  switch_ (unE y) [ne, nb]
+
+  label_ ne
+
+while :: E Word -> M () -> M ()
+while x y = do
+  np <- genLabel_
+  nb <- genLabel_
+  ne <- genLabel_
+
+  br_ np
+
+  label_ np
+  
+  switch_ (unE x) [ne, nb]
+
+  label_ nb
+
+  y
+
+  br_ np
+  
+  label_ ne
+
 
 switch :: E Word -> [M ()] -> M ()
 switch x ys = do
@@ -214,27 +250,33 @@ bar = do
   i <- new 12
   j <- load i
   switch j [ store i 33, store i 11 ]
-  
+
+inc x = do
+  a <- load x
+  store x (a .+ 1)
+
 foo = do
   i <- new $ w32 7
   switch 7 [ store i 42 >> store i 44, store i 22, store i 55, bar ]
-  j <- load i
-  store i (j .+ 7)
-  t <- tuple (w32 6) (w32 7)
-  j <- load $ fst t
-  switch j [ store i 13, store i 55 ]
-  j <- load $ snd t
-  switch j [ store i 55, store i 13 ]
-  arr <- array [ w32 3, 4, 5]
-  store (idx arr 4) 12
-  a1 <- load $ idx arr 1
-  store (idx arr 1) 2
-  j <- load $ idx arr 1
-  switch j
-    [ store (idx arr 0) 99
-    , store (fst t) 12
-    , store (snd t) 45
-    ]
+--   j <- load i
+--   store i (j .+ 7)
+--   t <- tuple (w32 6) (w32 7)
+--   j <- load $ fst t
+--   switch j [ store i 13, store i 55 ]
+--   j <- load $ snd t
+--   switch j [ store i 55, store i 13 ]
+--   arr <- array [ w32 3, 4, 5]
+--   store (idx arr 4) 12
+--   a1 <- load $ idx arr 1
+--   store (idx arr 1) 2
+--   j <- load $ idx arr 1
+--   switch j
+--     [ store (idx arr 0) 99
+--     , store (fst t) 12
+--     , store (snd t) 45
+--     ]
+--   store i 10
+--   dowhile (dec i) (load i)
   
 store :: E (Ptr a) -> E a -> M ()
 store x y = store_ (unE x) (unE y)
@@ -395,11 +437,11 @@ infix 4 .<=
 bnot :: E Word -> E Word
 bnot x = negate x .- 1
 
-w32 :: Integral a => a -> E Word
-w32 = E . VWord . fromIntegral
+w32 :: Word -> E Word
+w32 = E . VWord
 
 instance Num (E Word) where
-  fromInteger = w32
+  fromInteger = w32 . fromInteger
   negate x = 0 .- x
   abs = undefined
   signum = undefined
@@ -407,6 +449,6 @@ instance Num (E Word) where
   (*) = undefined
 
 instance Enum (E Word) where
-  toEnum = w32
+  toEnum = w32 . fromIntegral
   fromEnum (E (VWord x)) = fromIntegral x
   
