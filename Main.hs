@@ -241,19 +241,14 @@ count x = case typeofE x of
   PointerType (ArrayType n _) _ -> w32 $ fromIntegral n
   _ -> error "count"
 
+(.=!) p f = p .= f (load p)
+
 foldr :: (E a -> E b -> E b) -> E (Ptr b) -> E (Ptr (Array a)) -> M ()
-foldr f p arr = do
-  i <- new $ count arr
-  while (load i .!= 0) $ do
-    dec i
-    p .= (f (load $ idx arr $ load i) $ load p)
+foldr f p arr =
+  downFrom (count arr) $ \i -> p .=! f (load $ idx arr i)
                  
 map :: (E a -> E b) -> E (Ptr (Array a)) -> E (Ptr (Array b)) -> M ()
-map f xs ys = do
-  i <- new $ count xs
-  while (load i .!= 0) $ do
-    dec i
-    idx ys (load i) .= f (load $ idx xs $ load i)
+map f xs ys = downFrom (count xs) $ \i -> idx ys i .= f (load $ idx xs i)
   
 array :: [E a] -> M (E (Ptr (Array a)))
 array [] = error "empty array"
@@ -488,9 +483,10 @@ instance Enum (E Word) where
 infix 1 .+= -- BAL: Is this right?
 infix 1 .-= -- BAL: Is this right?
 infix 1 .= -- BAL: Is this right?
+infix 1 .=! -- BAL: Is this right?
 
-(.+=) x y = x .= load x .+ y
-(.-=) x y = x .= load x .- y
+(.+=) x y = x .=! (.+ y)
+(.-=) x y = x .=! (.- y)
 
 putw :: E Word -> M ()
 putw = undefined
@@ -504,16 +500,22 @@ if_ x y z = switch (zext x) [z,y]
 when :: E Bool -> M () -> M ()
 when x y = if_ x y nop
 
+divBy x y = x .% y .== 0
+
+downFrom x f = do
+  i <- new x
+  let i' = load i
+  dowhile (i' .!= 0) $ do
+    dec i
+    f i'
+         
 prob1 = do
-  i <- new 999
   sum <- new 0
-  dowhile (load i .!= 0) $ do
-    when (((load i .% 3) .== 0) .&& ((load i .% 3) .== 0)) $
-      sum .+= load i
+  downFrom 999 $ \i -> when (i `divBy` 3 .&& i `divBy` 5) $ sum .+= i
   putw $ load sum
 
 isEven :: E Word -> E Bool
-isEven x = x .% 2 .== 0
+isEven = flip divBy 2
 
 swap :: E (Ptr Word) -> E (Ptr Word) -> M ()
 swap x y = do
@@ -529,4 +531,3 @@ prob2 = do
     when (isEven $ load j) $ sum .+= load j
     swap i j
     j .+= load i
-    
