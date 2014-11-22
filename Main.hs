@@ -131,13 +131,20 @@ runFunc x = case x of
     b
   Switch_ a bs c -> do
     oa <- genOperand a
-    terminate $ Switch oa (last bs) $ zip (P.map (Const.Int 32) [0 ..]) $ init bs
+    terminate $
+      Switch oa (last bs) $
+      zip (P.map (mkConstInt (typeofExpr a)) [0 ..]) $ init bs
     c
   GenLabel_ a -> genName >>= a
   Label_ a b -> do
     modify $ \st -> st{ label = a }
     b
   Nop a -> a
+
+mkConstInt :: Type -> Integer -> Const.Constant
+mkConstInt t x = case t of
+  IntegerType a -> Const.Int a x
+  _ -> error "mkConstInt"
   
 data Ptr a
 
@@ -199,7 +206,7 @@ new :: E a -> M (E (Ptr a))
 new x = do
   n <- alloca_ t
   let v = E $ VName (ptr t) n
-  store v x
+  v .= x
   return v
   where
     t = typeofE x
@@ -223,8 +230,8 @@ tuple :: E a -> E b -> M (E (Ptr (Tuple a b)))
 tuple x y = do
   n <- alloca_ t
   let v = E $ VName (ptr t) n
-  store (fst v) x
-  store (snd v) y
+  fst v .= x
+  snd v .= y
   return v
   where
     t = StructureType False [typeofE x, typeofE y]
@@ -239,54 +246,59 @@ foldr f p arr = do
   i <- new $ count arr
   while (load i .!= 0) $ do
     dec i
-    store p $ f (load $ idx arr $ load i) $ load p
+    p .= (f (load $ idx arr $ load i) $ load p)
                  
 map :: (E a -> E b) -> E (Ptr (Array a)) -> E (Ptr (Array b)) -> M ()
 map f xs ys = do
   i <- new $ count xs
   while (load i .!= 0) $ do
     dec i
-    store (idx ys $ load i) $ f $ load $ idx xs $ load i
+    idx ys (load i) .= f (load $ idx xs $ load i)
   
 array :: [E a] -> M (E (Ptr (Array a)))
 array [] = error "empty array"
 array xs = do
   n <- alloca_ t
   let v = E $ VName (ptr t) n
-  mapM_ (\(i,x) -> store (idx v i) x) $ zip [0 .. ] xs
+  mapM_ (\(i,x) -> idx v i .= x) $ zip [0 .. ] xs
   return v
   where
     t = ArrayType (fromIntegral $ length xs) $ typeofE $ head xs
 
 bar = do
   i <- new 12
-  switch (load i) [ store i 33, store i 11 ]
+  switch (load i) [ i .= 33, i .= 11 ]
 
-inc x = store x (load x .+ 1)
-dec x = store x (load x .- 1)
+inc x = x .+= 1
+dec x = x .-= 1
 
 foo :: M ()
 foo = do
   i <- new $ w32 7
-  switch 7 [ store i 42 >> store i 44, store i 22, store i 55, bar ]
-  store i (load i .+ 7)
+  switch 7
+    [ do i .= 42
+         i .= 44
+    , i .= 22
+    , i .= 55
+    , bar ]
+  i .= load i .+ 7
   t <- tuple (w32 6) (w32 7)
-  switch (load $ fst t) [ store i 13, store i 55 ]
-  switch (load $ snd t) [ store i 55, store i 13 ]
+  switch (load $ fst t) [ i .= 13, i .= 55 ]
+  switch (load $ snd t) [ i .= 55, i .= 13 ]
   arr <- array [ w32 3, 4, 5]
-  store (idx arr 4) 12
-  store (idx arr 1) 2
+  idx arr 4 .= 12
+  idx arr 1 .= 2
   switch (load $ idx arr 1)
-    [ store (idx arr 0) 99
-    , store (fst t) 12
-    , store (snd t) 45
+    [ idx arr 0 .= 99
+    , fst t .= 12
+    , snd t .= 45
     ]
-  store i 10
+  i .= 10
   dowhile (load i .!= 0) $ dec i
   return ()
 
-store :: E (Ptr a) -> E a -> M ()
-store x y = store_ (unE x) (unE y)
+(.=) :: E (Ptr a) -> E a -> M ()
+(.=) x y = store_ (unE x) (unE y)
 
 genName :: O Name
 genName = do
@@ -371,6 +383,7 @@ typeofExpr e = case e of
     UGe -> i1
     ULt -> i1
     ULe -> i1
+    Zext t -> t
     Load_ -> case typeofExpr x of
       PointerType t _ -> t
       _ -> error "Load"
@@ -405,6 +418,8 @@ infixl 8 .<<
 infixl 8 .>>
 infixl 7 .&
 infixl 5 .|
+infixl 7 .&&
+infixl 5 .||
 infixl 6 .^
 infix 4 .==
 infix 4 .!=
@@ -470,7 +485,12 @@ instance Enum (E Word) where
     E (VWord a) -> fromIntegral a
     _ -> error "fromEnum"
 
-(.+=) x y = store x $ load x .+ y
+infix 1 .+= -- BAL: Is this right?
+infix 1 .-= -- BAL: Is this right?
+infix 1 .= -- BAL: Is this right?
+
+(.+=) x y = x .= load x .+ y
+(.-=) x y = x .= load x .- y
 
 putw :: E Word -> M ()
 putw = undefined
@@ -498,8 +518,8 @@ isEven x = x .% 2 .== 0
 swap :: E (Ptr Word) -> E (Ptr Word) -> M ()
 swap x y = do
   tmp <- new $ load x
-  store x $ load y
-  store y $ load tmp
+  x .= load y
+  y .= load tmp
 
 prob2 = do
   i <- new 1

@@ -15,3 +15,4 @@ Main_flymake.hs
 *.bc
 *.s
 *.ll
+*.opt
